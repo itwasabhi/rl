@@ -15,6 +15,7 @@ import time
 import traceback
 import warnings
 from contextlib import nullcontext
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -54,6 +55,7 @@ from torchrl.collectors import (
     SyncDataCollector,
     WeightUpdaterBase,
 )
+from torchrl.collectors._base import _ProfilerHook
 from torchrl.collectors._constants import _Interruptor
 from torchrl.collectors._multi_base import MultiCollector
 from torchrl.collectors.distributed.ray import _has_ray, RayCollector
@@ -3304,8 +3306,6 @@ class TestPreemptiveThreshold:
 
     def test_multisync_split_trajs_set_seed(self):
         """Test that MultiSyncCollector with split_trajs=True and set_seed works without errors."""
-        from torchrl.testing.mocking_classes import CountingEnv
-
         env_maker = lambda: CountingEnv(max_steps=100)
         policy = RandomPolicy(env_maker().action_spec)
         collector = MultiSyncCollector(
@@ -5757,8 +5757,6 @@ class TestCollectorProfiling:
 
     def test_profile_config_get_save_path(self):
         """Test ProfileConfig.get_save_path method."""
-        from pathlib import Path
-
         # Default path
         config = ProfileConfig(save_path=None)
         path = config.get_save_path(worker_idx=0)
@@ -5917,8 +5915,6 @@ class TestCollectorProfiling:
         """``enable_profile`` should install a ``_ProfilerHook`` as the
         ``post_collect_hook`` and self-stop after ``num_rollouts``.
         """
-        from torchrl.collectors._base import _ProfilerHook
-
         env = ContinuousActionVecMockEnv()
         collector = Collector(
             create_env_fn=lambda: ContinuousActionVecMockEnv(),

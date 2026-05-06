@@ -22,6 +22,7 @@ from torchrl.envs import (
     Compose,
     EnvCreator,
     InitTracker,
+    ParallelEnv,
     SerialEnv,
     TensorDictPrimer,
     TransformedEnv,
@@ -900,8 +901,6 @@ class TestLSTMModule:
         self, python_based, parallel, heterogeneous, within, maybe_fork_ParallelEnv
     ):
 
-        from torchrl.envs import InitTracker, TransformedEnv
-
         torch.manual_seed(0)
         num_envs = 3
         device = "cuda" if torch.cuda.device_count() else "cpu"
@@ -1320,8 +1319,6 @@ class TestGRUModule:
     def _test_gru_parallel_env(
         self, python_based, parallel, heterogeneous, within, maybe_fork_ParallelEnv
     ):
-        from torchrl.envs import InitTracker, ParallelEnv, TransformedEnv
-
         torch.manual_seed(0)
         num_workers = 3
 

@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import warnings
 
 import pytest
 import torch
-from tensordict import TensorDict
+from tensordict import NonTensorData, TensorDict
 from tensordict.nn import CompositeDistribution, TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 
@@ -221,8 +222,6 @@ class TestProbabilisticActorGenerator:
 
     def test_generator_td_key_int_writeback(self):
         """Int seed in the input tensordict is treated as a stream-key (JAX-style)."""
-        from tensordict import NonTensorData
-
         a = self._make_actor(generator="rng")
 
         def run(seed, n_steps):
@@ -241,8 +240,6 @@ class TestProbabilisticActorGenerator:
 
     def test_generator_td_key_generator_form(self):
         """A Generator placed in the input tensordict is used in place."""
-        from tensordict import NonTensorData
-
         a = self._make_actor(generator="rng")
         td = TensorDict(obs=torch.zeros(4))
         td["rng"] = NonTensorData(torch.Generator().manual_seed(0))
@@ -787,8 +784,6 @@ class TestQValue:
 
     def test_qvalue_actor_strict_shape_normal_no_warning(self):
         """Test that matching shapes produce no warning even with strict_shape='auto'."""
-        import warnings
-
         action_spec = OneHot(4)
         module = TensorDictModule(
             module=nn.Linear(3, 4), in_keys=("observation",), out_keys=("action_value",)
