@@ -97,9 +97,12 @@ from torchrl.envs.utils import (
 from torchrl.modules import (
     Actor,
     GRUModule,
+    NormalParamExtractor,
     OrnsteinUhlenbeckProcessModule,
+    ProbabilisticActor,
     RandomPolicy,
     SafeModule,
+    TanhNormal,
 )
 from torchrl.testing import (
     CARTPOLE_VERSIONED,
@@ -6153,6 +6156,38 @@ class TestTrajsPerBatch:
                 env.close(raise_if_closed=False)
 
 
+class _PolicyWithInfo(nn.Module):
+    def __init__(self, action_dim):
+        super().__init__()
+        self.action_dim = action_dim
+
+    def forward(self, obs):
+        action = obs.new_zeros(*obs.shape[:-1], self.action_dim)
+        policy_info = obs.sum(-1, keepdim=True)
+        return action, policy_info
+
+
+def _make_policy_with_info():
+    return TensorDictModule(
+        _PolicyWithInfo(7),
+        in_keys=["observation"],
+        out_keys=["action", "policy_info"],
+    )
+
+
+class _CountingPolicyWithInfoFactory:
+    def __init__(self, counter, lock, pids):
+        self.counter = counter
+        self.lock = lock
+        self.pids = pids
+
+    def __call__(self):
+        with self.lock:
+            self.counter.value += 1
+            self.pids.append(os.getpid())
+        return _make_policy_with_info()
+
+
 class TestTrajsPerBatchReplayBuffer:
     """Tests for trajs_per_batch + ReplayBuffer integration.
 
@@ -6186,6 +6221,53 @@ class TestTrajsPerBatchReplayBuffer:
         finally:
             probe.close(raise_if_closed=False)
         return env_fn, policy
+
+    @staticmethod
+    def _make_continuous_env_and_probabilistic_policy(max_steps=4):
+        env_fn = lambda: TransformedEnv(  # noqa: E731
+            ContinuousActionVecMockEnv(maxstep=max_steps), StepCounter(max_steps)
+        )
+        probe = env_fn()
+        try:
+            obs_dim = probe.observation_spec["observation"].shape[-1]
+            action_dim = probe.action_spec.shape[-1]
+            module = TensorDictModule(
+                nn.Sequential(
+                    nn.Linear(obs_dim, 2 * action_dim), NormalParamExtractor()
+                ),
+                in_keys=["observation"],
+                out_keys=["loc", "scale"],
+            )
+            try:
+                policy = ProbabilisticActor(
+                    module=module,
+                    in_keys=["loc", "scale"],
+                    out_keys=["action"],
+                    spec=probe.action_spec,
+                    distribution_class=TanhNormal,
+                    return_log_prob=True,
+                )
+            except TypeError as err:
+                if "unexpected keyword argument 'generator'" not in str(err):
+                    raise
+                pytest.skip("Installed TensorDict is too old for ProbabilisticActor.")
+        finally:
+            probe.close(raise_if_closed=False)
+        return env_fn, policy
+
+    @staticmethod
+    def _make_continuous_env_and_policy_with_info(max_steps=4):
+        env_fn = lambda: TransformedEnv(  # noqa: E731
+            ContinuousActionVecMockEnv(maxstep=max_steps), StepCounter(max_steps)
+        )
+        probe = env_fn()
+        try:
+            action_dim = probe.action_spec.shape[-1]
+            if action_dim != 7:
+                raise RuntimeError(f"Expected action_dim=7 but got {action_dim}.")
+        finally:
+            probe.close(raise_if_closed=False)
+        return env_fn, _make_policy_with_info
 
     @staticmethod
     def _make_batched_env_fn(max_steps=4, num_envs=2):
@@ -6684,6 +6766,96 @@ class TestTrajsPerBatchReplayBuffer:
         assert len(rb) > 0, "replay buffer must be non-empty"
         assert ("collector", "traj_ids") in rb.sample(2).keys(True)
         self._assert_rb_trajectories_complete(rb)
+
+    def test_multi_async_probabilistic_actor_writes_log_prob_to_rb(self):
+        max_steps = 4
+        num_trajs = 2
+        env_fn, policy = self._make_continuous_env_and_probabilistic_policy(max_steps)
+        rb = ReplayBuffer(storage=LazyTensorStorage(400), shared=True)
+        collector = MultiAsyncCollector(
+            [env_fn, env_fn],
+            policy,
+            replay_buffer=rb,
+            frames_per_batch=max_steps * 4,
+            total_frames=max_steps * 24,
+            trajs_per_batch=num_trajs,
+            cat_results="stack",
+        )
+        try:
+            for _ in collector:
+                pass
+        finally:
+            collector.shutdown()
+
+        assert len(rb) > 0, "replay buffer must be non-empty"
+        all_data = rb.storage[: len(rb)]
+        assert "action_log_prob" in all_data.keys(True, True)
+        self._assert_rb_trajectories_complete(rb)
+
+    def test_multi_async_policy_writes_extra_output_to_rb(self):
+        max_steps = 4
+        num_trajs = 2
+        env_fn, policy_factory = self._make_continuous_env_and_policy_with_info(
+            max_steps
+        )
+        rb = ReplayBuffer(storage=LazyTensorStorage(400), shared=True)
+        collector = MultiAsyncCollector(
+            [env_fn, env_fn],
+            policy_factory=policy_factory,
+            replay_buffer=rb,
+            frames_per_batch=max_steps * 4,
+            total_frames=max_steps * 24,
+            trajs_per_batch=num_trajs,
+            cat_results="stack",
+        )
+        try:
+            for _ in collector:
+                pass
+        finally:
+            collector.shutdown()
+
+        assert len(rb) > 0, "replay buffer must be non-empty"
+        all_data = rb.storage[: len(rb)]
+        assert "policy_info" in all_data.keys(True, True)
+        self._assert_rb_trajectories_complete(rb)
+
+    def test_multi_async_policy_factory_is_built_only_in_workers(self):
+        max_steps = 4
+        num_trajs = 2
+        num_workers = 2
+        env_fn, _ = self._make_continuous_env_and_policy_with_info(max_steps)
+        manager = torch.multiprocessing.Manager()
+        policy_factory_calls = manager.Value("i", 0)
+        policy_factory_call_lock = manager.Lock()
+        policy_factory_pids = manager.list()
+        policy_factory = _CountingPolicyWithInfoFactory(
+            policy_factory_calls, policy_factory_call_lock, policy_factory_pids
+        )
+        rb = ReplayBuffer(storage=LazyTensorStorage(400), shared=True)
+        collector = MultiAsyncCollector(
+            [env_fn for _ in range(num_workers)],
+            policy_factory=policy_factory,
+            replay_buffer=rb,
+            frames_per_batch=max_steps * 4,
+            total_frames=max_steps * 24,
+            trajs_per_batch=num_trajs,
+            cat_results="stack",
+        )
+        try:
+            for _ in collector:
+                pass
+            collector.shutdown()
+            assert os.getpid() not in set(policy_factory_pids)
+            assert len(set(policy_factory_pids)) == num_workers
+            assert policy_factory_calls.value == num_workers
+            assert len(rb) > 0, "replay buffer must be non-empty"
+            all_data = rb.storage[: len(rb)]
+            assert "policy_info" in all_data.keys(True, True)
+            self._assert_rb_trajectories_complete(rb)
+        finally:
+            with contextlib.suppress(Exception):
+                collector.shutdown()
+            manager.shutdown()
 
     # ------------------------------------------------------------------
     # Batched env: trajectory completeness (yielded batches, not RB)
