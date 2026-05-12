@@ -4,12 +4,13 @@
 # LICENSE file in the root directory of this source tree.
 from __future__ import annotations
 
-import importlib.util
+import importlib.metadata
 import typing
 from typing import Any
 
 import torch
 import torch.nn.functional as F
+from packaging import version
 from tensordict import TensorDict, TensorDictBase, unravel_key_list
 from tensordict.base import NO_DEFAULT
 from tensordict.nn import dispatch, TensorDictModuleBase as ModuleBase
@@ -25,7 +26,11 @@ from torchrl._utils import (
 )
 from torchrl.data.tensor_specs import Unbounded
 
-_has_torch_scan = importlib.util.find_spec("torch._higher_order_ops.scan") is not None
+# ``torch._higher_order_ops.scan`` was introduced in PyTorch 2.6. Gate the
+# import on the runtime torch version: probing via ``importlib.util.find_spec``
+# would eagerly import the (missing) ``torch._higher_order_ops`` parent on
+# older builds and crash this module at load time.
+_has_torch_scan = version.parse(torch.__version__) >= version.parse("2.6.0")
 if _has_torch_scan:
     from torch._higher_order_ops import scan as _torch_scan
 else:
@@ -36,12 +41,17 @@ def _check_triton_available() -> bool:
     """True if Triton is installed and exposes the API the kernels need.
 
     Mirrors the probe in :mod:`torchrl.modules.tensordict_module._rnn_triton`.
-    Checks for the ``triton.language.extra.libdevice`` submodule (Triton
-    >= 2.2). Older Triton builds fall back to the scan / pad backends.
+    The backend requires ``triton.language.extra.libdevice`` which is only
+    available from Triton 2.2 onwards. Older Triton builds fall back to the
+    scan / pad backends. The version is read from package metadata to avoid
+    eagerly importing Triton (or its missing ``triton.language.extra`` parent)
+    at torchrl import time.
     """
-    if importlib.util.find_spec("triton") is None:
+    try:
+        triton_version = importlib.metadata.version("triton")
+    except importlib.metadata.PackageNotFoundError:
         return False
-    return importlib.util.find_spec("triton.language.extra.libdevice") is not None
+    return version.parse(triton_version) >= version.parse("2.2")
 
 
 _has_triton = _check_triton_available()
