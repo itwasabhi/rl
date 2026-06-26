@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-06-26T08:59:17.634751+00:00",
+  "last_updated": "2026-06-26T19:59:24.019883+00:00",
   "stats": {
     "last_7_days": {
       "days": 7,
@@ -22,7 +22,7 @@
     {
       "date": "2026-06-26",
       "orchestrator_ran": true,
-      "orchestrator_status": "pending",
+      "orchestrator_status": "queued",
       "orchestrator_url": "https://github.com/itwasabhi/rl/actions/runs/28227986243",
       "orchestrator_run_id": 28227986243,
       "workflows": {
