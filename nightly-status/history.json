@@ -1,24 +1,137 @@
 {
-  "last_updated": "2026-09-11T20:48:39.994260+00:00",
+  "last_updated": "2026-09-12T10:03:44.750547+00:00",
   "stats": {
     "last_7_days": {
       "days": 7,
       "runs_with_data": 7,
-      "total_workflow_runs": 71,
+      "total_workflow_runs": 73,
       "total_success": 63,
-      "total_failure": 8,
-      "success_rate": 88.7
+      "total_failure": 10,
+      "success_rate": 86.3
     },
     "last_30_days": {
       "days": 30,
       "runs_with_data": 30,
-      "total_workflow_runs": 310,
+      "total_workflow_runs": 311,
       "total_success": 270,
-      "total_failure": 40,
-      "success_rate": 87.1
+      "total_failure": 41,
+      "success_rate": 86.8
     }
   },
   "history": [
+    {
+      "date": "2026-09-12",
+      "orchestrator_ran": true,
+      "orchestrator_status": "pending",
+      "orchestrator_url": "https://github.com/itwasabhi/rl/actions/runs/34687230873",
+      "orchestrator_run_id": 34687230873,
+      "workflows": {
+        "test-linux.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536243899",
+          "display_name": "Linux Tests"
+        },
+        "test-linux-llm.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242834",
+          "display_name": "LLM Tests"
+        },
+        "test-linux-habitat.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242924",
+          "display_name": "Habitat Tests"
+        },
+        "test-linux-tutorials.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242491",
+          "display_name": "Tutorials Tests"
+        },
+        "test-linux-sota.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242516",
+          "display_name": "SOTA Tests"
+        },
+        "test-linux-libs.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536243440",
+          "display_name": "Libs Tests"
+        },
+        "test-windows-optdepts.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242707",
+          "display_name": "Windows Tests"
+        },
+        "lint.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242575",
+          "display_name": "Lint"
+        },
+        "docs.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242757",
+          "display_name": "Documentation"
+        },
+        "benchmarks.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242627",
+          "display_name": "Benchmarks"
+        },
+        "validate-test-partitioning.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242303",
+          "display_name": "Test Partitioning"
+        },
+        "nightly_build.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536243002",
+          "display_name": "Nightly Build"
+        },
+        "build-wheels-linux.yml": {
+          "status": "failure",
+          "conclusion": "failure",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536242535",
+          "display_name": "Wheels (Linux)"
+        },
+        "build-wheels-m1.yml": {
+          "status": "failure",
+          "conclusion": "failure",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536409652",
+          "display_name": "Wheels (M1)"
+        },
+        "build-wheels-windows.yml": {
+          "status": "failure",
+          "conclusion": "failure",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536558907",
+          "display_name": "Wheels (Windows)"
+        },
+        "build-wheels-aarch64-linux.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/itwasabhi/rl/actions/runs/34687230873/job/103536691348",
+          "display_name": "Wheels (Aarch64)"
+        }
+      },
+      "summary": {
+        "total": 16,
+        "success": 9,
+        "failure": 3,
+        "skipped": 4,
+        "other": 0,
+        "success_rate": 75.0
+      }
+    },
     {
       "date": "2026-09-11",
       "orchestrator_ran": true,
@@ -10064,119 +10177,6 @@
           "status": "cancelled",
           "conclusion": "cancelled",
           "url": "https://github.com/itwasabhi/rl/actions/runs/27544507844/job/81414365359",
-          "display_name": "Wheels (Aarch64)"
-        }
-      },
-      "summary": {
-        "total": 16,
-        "success": 9,
-        "failure": 1,
-        "skipped": 4,
-        "other": 2,
-        "success_rate": 75.0
-      }
-    },
-    {
-      "date": "2026-06-14",
-      "orchestrator_ran": true,
-      "orchestrator_status": "queued",
-      "orchestrator_url": "https://github.com/itwasabhi/rl/actions/runs/27494631408",
-      "orchestrator_run_id": 27494631408,
-      "workflows": {
-        "test-linux.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301364",
-          "display_name": "Linux Tests"
-        },
-        "test-linux-llm.yml": {
-          "status": "skipped",
-          "conclusion": "skipped",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301275",
-          "display_name": "LLM Tests"
-        },
-        "test-linux-habitat.yml": {
-          "status": "skipped",
-          "conclusion": "skipped",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301394",
-          "display_name": "Habitat Tests"
-        },
-        "test-linux-tutorials.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301343",
-          "display_name": "Tutorials Tests"
-        },
-        "test-linux-sota.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301306",
-          "display_name": "SOTA Tests"
-        },
-        "test-linux-libs.yml": {
-          "status": "skipped",
-          "conclusion": "skipped",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301301",
-          "display_name": "Libs Tests"
-        },
-        "test-windows-optdepts.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301314",
-          "display_name": "Windows Tests"
-        },
-        "lint.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301349",
-          "display_name": "Lint"
-        },
-        "docs.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301451",
-          "display_name": "Documentation"
-        },
-        "benchmarks.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301173",
-          "display_name": "Benchmarks"
-        },
-        "validate-test-partitioning.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301152",
-          "display_name": "Test Partitioning"
-        },
-        "nightly_build.yml": {
-          "status": "skipped",
-          "conclusion": "skipped",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301454",
-          "display_name": "Nightly Build"
-        },
-        "build-wheels-linux.yml": {
-          "status": "cancelled",
-          "conclusion": "cancelled",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301293",
-          "display_name": "Wheels (Linux)"
-        },
-        "build-wheels-m1.yml": {
-          "status": "success",
-          "conclusion": "success",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301305",
-          "display_name": "Wheels (M1)"
-        },
-        "build-wheels-windows.yml": {
-          "status": "failure",
-          "conclusion": "failure",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301290",
-          "display_name": "Wheels (Windows)"
-        },
-        "build-wheels-aarch64-linux.yml": {
-          "status": "cancelled",
-          "conclusion": "cancelled",
-          "url": "https://github.com/itwasabhi/rl/actions/runs/27494631408/job/81266301250",
           "display_name": "Wheels (Aarch64)"
         }
       },
