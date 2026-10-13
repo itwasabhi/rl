@@ -361,6 +361,8 @@ EXCLUDED_EXAMPLES = {
     "examples/microduck/heuristic_gait.py": "requires the external MicroDuck MJCF assets",
     "examples/microduck/ppo_mujoco.py": "requires the external MicroDuck MJCF assets",
     "examples/mujoco_macros/_viewer.py": "viewer helper module",
+    "examples/multi-agent-push/mappo.py": "requires MuJoCo Playground; smoke-tested by test/libs/test_mujoco_playground.py",
+    "examples/multi-agent-push/push_env.py": "environment module imported by mappo.py",
     "examples/replay-buffers/compressed_replay_buffer.py": "requires nvCOMP and Atari assets",
     "examples/replay-buffers/compressed_replay_buffer_checkpoint.py": "requires nvCOMP",
     "examples/rlhf/_smoke.py": "shared RLHF smoke-data helper",

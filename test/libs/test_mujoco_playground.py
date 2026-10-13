@@ -4,8 +4,11 @@
 # LICENSE file in the root directory of this source tree.
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import os
+import pathlib
+import sys
 
 import numpy as np
 import pytest
@@ -27,6 +30,22 @@ from torchrl.envs.utils import check_env_specs
 from torchrl.testing import get_available_devices
 
 _has_jax = importlib.util.find_spec("jax") is not None
+
+# The multi-agent push example lives next to its training script, which imports
+# its sibling ``push_env`` module, so its folder has to be importable.
+if _has_mujoco_playground:
+    sys.path.insert(
+        0,
+        str(
+            pathlib.Path(__file__).resolve().parents[2]
+            / "examples"
+            / "multi-agent-push"
+        ),
+    )
+    import jax
+    import jax.numpy as jnp
+    import mappo as push_mappo
+    import push_env
 
 # Default config: force JAX backend on all envs (CPU-only machines lack other backends)
 _JAX_CONFIG = {"impl": "jax"}
@@ -852,8 +871,136 @@ class TestMujocoPlaygroundFrameSkip:
             env.close()
 
 
-if __name__ == "__main__":
-    import argparse
+@pytest.mark.skipif(
+    not _has_mujoco_playground, reason="mujoco_playground not installed"
+)
+@pytest.mark.parametrize("device", get_available_devices())
+class TestMujocoPlaygroundPush:
+    """The multi-agent push example (``examples/multi-agent-push``)."""
 
+    @staticmethod
+    def _joint(env, name, what="qposadr"):
+        return int(getattr(env.mj_model.joint(name), what)[0])
+
+    @pytest.mark.parametrize("num_cars", [2, 3])
+    def test_stacked_env_specs_and_synchronous_done(self, device, num_cars):
+        max_steps = 6
+        env = push_mappo.make_env(3, num_cars, max_steps, device)
+        try:
+            env.set_seed(0)
+            check_env_specs(env)
+            rollout = env.rollout(max_steps)
+            # one egocentric block + shared block + the agent id of "max" mode
+            obs_dim = push_env.CAR_OBS_SIZE + push_env.SHARED_OBS_SIZE + num_cars
+            assert rollout["agents", "observation"].shape == (
+                3,
+                max_steps,
+                num_cars,
+                obs_dim,
+            )
+            assert rollout["agents", "action"].shape == (3, max_steps, num_cars, 2)
+            # No partial resets in the wrapper: every vmapped env must finish on
+            # the same step, and not before.
+            done = rollout["next", "done"].squeeze(-1)
+            assert done[:, -1].all()
+            assert not done[:, :-1].any()
+            # The running episode return keeps accumulating across the episode.
+            torch.testing.assert_close(
+                rollout["next", "agents", "episode_reward"][:, -1],
+                rollout["next", "agents", "reward"].sum(1),
+            )
+        finally:
+            env.close()
+
+    def test_cars_push_box_to_goal(self, device):
+        env = push_env.PushEnv.push_to_goal(num_cars=2)
+        state = jax.jit(env.reset)(jax.random.PRNGKey(0))
+        qpos = jnp.zeros(env.mjx_model.nq)
+        for name, value in {
+            "box_x": 0.0,
+            "box_y": 0.0,
+            "car_0_x": -0.5,
+            "car_0_y": 0.05,
+            "car_1_x": -0.5,
+            "car_1_y": -0.05,
+        }.items():
+            qpos = qpos.at[self._joint(env, name)].set(value)
+        # Goal 1 m ahead of the box along +x; both cars face +x behind the box.
+        data = state.data.replace(qpos=qpos, mocap_pos=jnp.asarray([[1.0, 0.0, 0.002]]))
+        state = state.replace(
+            data=data, info={"steps": jnp.zeros(()), "prev_dist": jnp.ones(())}
+        )
+        step = jax.jit(env.step)
+        forward = jnp.asarray([1.0, 0.0, 1.0, 0.0])
+        total_reward = 0.0
+        for _ in range(30):
+            state = step(state, forward)
+            total_reward += float(state.reward)
+        box_x = float(state.data.qpos[self._joint(env, "box_x")])
+        # 30 steps at 1 m/s would carry a free car 1.5 m, the box starts 0.5 m
+        # ahead: it only moves if the cars really push it.
+        assert box_x > 0.5
+        assert float(state.metrics["dist_to_goal"]) < 0.6
+        assert total_reward > 0
+
+    def test_car_cannot_slide_sideways(self, device):
+        env = push_env.PushEnv.push_to_goal(num_cars=1)
+        state = jax.jit(env.reset)(jax.random.PRNGKey(0))
+        step = jax.jit(env.step)
+        for _ in range(20):
+            state = step(state, jnp.asarray([1.0, 0.5]))
+        qvel = state.data.qvel
+        vx = float(qvel[self._joint(env, "car_0_x", "dofadr")])
+        vy = float(qvel[self._joint(env, "car_0_y", "dofadr")])
+        yaw = float(state.data.qpos[self._joint(env, "car_0_yaw")])
+        forward_speed = vx * np.cos(yaw) + vy * np.sin(yaw)
+        lateral_speed = -vx * np.sin(yaw) + vy * np.cos(yaw)
+        assert forward_speed == pytest.approx(env.task.max_speed, rel=0.1)
+        assert abs(lateral_speed) < 0.1 * forward_speed
+
+    @pytest.mark.parametrize("algo", ["mappo", "ippo"])
+    def test_loss_gradients_on_collected_data(self, device, algo):
+        env = push_mappo.make_env(2, 2, 8, device)
+        try:
+            env.set_seed(0)
+            actor = push_mappo.make_actor(env)
+            critic = push_mappo.make_critic(env, centralized=algo == "mappo")
+            loss_module = push_mappo.make_loss(actor, critic, algo, device)
+            with torch.no_grad():
+                data = env.rollout(8, actor)
+                loss_module.value_estimator(
+                    data,
+                    params=loss_module.critic_network_params,
+                    target_params=loss_module.target_critic_network_params,
+                )
+            losses = loss_module(data.reshape(-1))
+            sum(v for k, v in losses.items() if k.startswith("loss_")).backward()
+            grads = [p.grad for p in loss_module.parameters() if p.grad is not None]
+            assert grads
+            assert all(torch.isfinite(g).all() for g in grads)
+        finally:
+            env.close()
+
+    @pytest.mark.parametrize("algo", ["mappo", "ippo"])
+    def test_training_script_smoke(self, device, algo):
+        # Two short iterations of the example's own loop, evaluation included.
+        push_mappo.main(
+            argparse.Namespace(
+                algo=algo,
+                num_cars=2,
+                frames=32,
+                frames_per_batch=16,
+                minibatch_size=8,
+                max_steps=8,
+                epochs=1,
+                lr=3e-4,
+                eval_envs=2,
+                eval_interval=1,
+                seed=0,
+            )
+        )
+
+
+if __name__ == "__main__":
     args, unknown = argparse.ArgumentParser().parse_known_args()
     pytest.main([__file__, "--capture", "no", "--exitfirst"] + unknown)
