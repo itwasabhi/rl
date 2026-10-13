@@ -51,6 +51,13 @@ deterministic rollout of the actor in a separate batch of envs.
 
 The MJX simulation runs on whatever device JAX finds (a GPU is much faster than CPU).
 
+What to expect: on 4 CPU cores one 6,400-frame iteration takes about 30 seconds. In a
+365k-frame CPU run with the defaults the team return rose from about -6.6 to around 0
+and the final box-goal distance fell from 0.84 m to roughly 0.55-0.65 m, but the
+curve stayed noisy and the box was not yet delivered reliably. Treat the defaults as a
+working starting point, not a solved task: expect to need more frames (a GPU makes
+this practical) and some tuning of the reward weights in `PushTaskConfig`.
+
 ## Caveats
 
 - **Fixed-length episodes.** `MujocoPlaygroundWrapper` resets the whole vmapped batch
