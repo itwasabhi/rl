@@ -628,6 +628,11 @@ class Transform(nn.Module):
     def _inv_drops_key(self, key: NestedKey) -> bool:
         """Whether :meth:`_inv_call` removes ``key`` from the data seen by later transforms.
 
+        This hook is about usability, not behavior: it lets a transform advertise
+        a restriction on how it can be composed, so that an invalid chain fails
+        early with a clear error rather than silently producing wrong results.
+        It does not change how the inverse pass runs.
+
         :meth:`TransformedEnv._step` inverts the input data through the whole
         chain and hands the result to the :meth:`_step` of every transform. A
         transform whose inverse removes, or renames away, an entry therefore
