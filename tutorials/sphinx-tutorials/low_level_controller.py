@@ -1,19 +1,21 @@
 """
-Deploying low-level policies for high-level reinforcement learning
-=================================================================
+Training and deploying low-level policies for high-level reinforcement learning
+===============================================================================
 
 What you will learn
 -------------------
 
-Reuse a policy behind a smaller decision space, adapt its inputs with existing
-TensorDict transforms, and train the high-level actor with an ordinary PPO
-collector and loss. The same deployment supports shared policies over agents
-and explicit recurrent state. This example needs PyTorch, TensorDict, and
-TorchRL; it requires no robot assets or external simulator.
+Train a low-level controller with command-target and reward transforms, reuse
+it behind a smaller decision space, and train a high-level actor on top of it
+with an ordinary PPO collector and loss. The same deployment supports shared
+policies over agents and explicit recurrent state. This example needs PyTorch,
+TensorDict, and TorchRL; it requires no robot assets or external simulator.
 
-The physical task is TorchRL's pendulum. A low-level velocity servo produces
-torques. The high-level policy chooses a target velocity every five physical
-steps and receives the sum of the task rewards.
+The physical task is TorchRL's pendulum. In the first stage, a velocity servo
+learns to track a target velocity that a transform draws at every reset and
+that a second transform turns into a tracking reward. In the second stage, the
+high-level policy chooses the target velocity every five physical steps and
+receives the sum of the pendulum's task rewards.
 """
 
 from __future__ import annotations
@@ -21,16 +23,18 @@ from __future__ import annotations
 import os
 
 import torch
+from tensordict import TensorDictBase
 from tensordict.nn import NormalParamExtractor, TensorDictModule
 from torch import nn
 from torchrl.collectors import Collector
 from torchrl.data import Bounded, Composite
-from torchrl.envs import PendulumEnv, TransformedEnv
+from torchrl.envs import PendulumEnv, Transform, TransformedEnv
 from torchrl.envs.transforms import (
     CatTensors,
     ClosedLoopMultiAction,
     Compose,
     StepCounter,
+    TensorDictPrimer,
     UnsqueezeTransform,
 )
 from torchrl.envs.utils import check_env_specs
@@ -41,63 +45,167 @@ torch.manual_seed(0)
 fast = os.environ.get("TORCHRL_TUTORIALS_FAST", "0") == "1"
 
 # %%
-# A task and an existing controller
-# --------------------------------
+# A task and its transforms
+# -------------------------
 #
-# These transforms expose a vector observation while preserving the pendulum's
-# scalar state inputs. A physical episode lasts at most 200 control steps.
+# These transforms expose scalar pendulum states as vectors. A physical episode
+# lasts at most 200 control steps. The helper appends further transforms so the
+# low-level and high-level stages share the same physical task.
 
-task_env = TransformedEnv(
-    PendulumEnv(),
-    Compose(
-        UnsqueezeTransform(-1, in_keys=["th", "thdot"], out_keys=["angle", "velocity"]),
-        CatTensors(
-            in_keys=["angle", "velocity"],
-            out_key="observation",
-            sort=False,
-            del_keys=False,
+
+def pendulum_env(*transforms: Transform) -> TransformedEnv:
+    return TransformedEnv(
+        PendulumEnv(),
+        Compose(
+            UnsqueezeTransform(
+                -1, in_keys=["th", "thdot"], out_keys=["angle", "velocity"]
+            ),
+            StepCounter(max_steps=200),
+            *transforms,
         ),
-        StepCounter(max_steps=200),
+    )
+
+
+def train_ppo(env, actor, critic, *, frames, gamma):
+    """Run clipped PPO with a collector, and return the mean reward per batch."""
+    loss = ClipPPOLoss(actor, critic, normalize_advantage=True, entropy_coeff=0.01)
+    loss.set_keys(action=env.action_key)
+    loss.make_value_estimator(ValueEstimators.GAE, gamma=gamma, lmbda=0.95)
+    optimizer = torch.optim.Adam(loss.parameters(), lr=3e-4)
+    collector = Collector(env, actor, frames_per_batch=1000, total_frames=frames)
+    history = []
+    try:
+        for batch in collector:
+            with torch.no_grad():
+                loss.value_estimator(
+                    batch,
+                    params=loss.critic_network_params,
+                    target_params=loss.target_critic_network_params,
+                )
+            for _ in range(4):
+                losses = loss(batch.reshape(-1))
+                objective = (
+                    losses["loss_objective"]
+                    + losses["loss_critic"]
+                    + losses["loss_entropy"]
+                )
+                optimizer.zero_grad()
+                objective.backward()
+                optimizer.step()
+            history.append(batch["next", "reward"].mean().item())
+            collector.update_policy_weights_()
+    finally:
+        collector.shutdown()
+    return history
+
+
+# %%
+# Stage 1: train the low-level controller
+# ---------------------------------------
+#
+# Two transforms turn the pendulum into a velocity-tracking problem. A primer
+# draws a target velocity at every reset and carries it through the episode.
+# TrackingReward replaces the pendulum's swing-up reward with the negative
+# squared velocity error. The controller observes its velocity followed by the
+# target velocity, and outputs the physical torque.
+
+
+class TrackingReward(Transform):
+    """Reward the next velocity for being close to the commanded one."""
+
+    def __init__(self):
+        super().__init__(in_keys=[("next", "velocity")], out_keys=["reward"])
+
+    def forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        return self._call(tensordict)
+
+    def _call(self, next_tensordict: TensorDictBase) -> TensorDictBase:
+        error = next_tensordict["velocity"] - next_tensordict["target_velocity"]
+        next_tensordict["reward"] = -(error**2) / 16
+        return next_tensordict
+
+
+low_level_env = pendulum_env(
+    TensorDictPrimer(target_velocity=Bounded(-4.0, 4.0, shape=(1,)), random=True),
+    CatTensors(
+        in_keys=["velocity", "target_velocity"],
+        out_key="observation",
+        sort=False,
+        del_keys=False,
     ),
+    TrackingReward(),
 )
+check_env_specs(low_level_env)
 
-# This fixed servo keeps the example reproducible without a checkpoint download.
-# In an application, supply the already-trained TensorDict policy here, with its
-# original input/output keys and recurrent primers. Its observation is velocity
-# followed by target velocity. Its output is the physical torque.
-
-servo = nn.Linear(2, 1, bias=False)
-with torch.no_grad():
-    servo.weight.copy_(torch.tensor([[-0.5, 0.5]]))
-low_level_policy = TensorDictModule(
-    nn.Sequential(servo, nn.Hardtanh(-2.0, 2.0)),
-    in_keys=["observation"],
+low_level_policy = ProbabilisticActor(
+    module=TensorDictModule(
+        nn.Sequential(
+            MLP(in_features=2, out_features=2, num_cells=[64, 64]),
+            NormalParamExtractor(),
+        ),
+        in_keys=["observation"],
+        out_keys=["loc", "scale"],
+    ),
+    spec=low_level_env.full_action_spec_unbatched,
+    in_keys=["loc", "scale"],
     out_keys=["action"],
+    distribution_class=TanhNormal,
+    distribution_kwargs={"low": -2.0, "high": 2.0},
+    return_log_prob=True,
+)
+low_level_critic = TensorDictModule(
+    MLP(in_features=2, out_features=1, num_cells=[64, 64]),
+    in_keys=["observation"],
+    out_keys=["state_value"],
+)
+low_level_history = train_ppo(
+    low_level_env,
+    low_level_policy,
+    low_level_critic,
+    frames=2000 if fast else 100_000,
+    gamma=0.95,
 )
 
 # %%
 # Deployment is two objects
 # -------------------------
 #
-# The decision spec describes one controller. CatTensors adapts the task's
-# TensorDict without overwriting the high-level actor's observation: it runs in
-# the controller's private workspace.
+# The decision spec describes the high-level action space. CatTensors adapts
+# the task's TensorDict without overwriting the high-level actor's observation:
+# it runs in the controller's private workspace. The trained policy is used as is; the
+# environment runs it deterministically. Training leaves gradients behind, so we
+# clear them and freeze the policy before deployment.
 
+low_level_policy.zero_grad(set_to_none=True)
+low_level_policy.requires_grad_(False)
+task_env = pendulum_env(
+    CatTensors(
+        in_keys=["angle", "velocity"],
+        out_key="observation",
+        sort=False,
+        del_keys=False,
+    )
+)
+decision_spec = Composite(target_velocity=Bounded(-4.0, 4.0, shape=(1,)))
 controller = LowLevelController(
     low_level_policy,
-    decision_spec=Composite(target_velocity=Bounded(-4.0, 4.0, shape=(1,))),
+    decision_spec=decision_spec,
     adapter=CatTensors(
         in_keys=["velocity", "target_velocity"], out_key="observation", sort=False
     ),
 )
 training_env = ClosedLoopMultiAction.from_env(
-    task_env, controller, steps=5, reward_aggregation="sum"
+    task_env,
+    controller,
+    steps=5,
+    decision_spec=decision_spec,
+    reward_aggregation="sum",
 )
 check_env_specs(training_env)
 
 # %%
-# Ordinary PPO
-# -------------
+# Stage 2: ordinary PPO on top
+# ----------------------------
 #
 # Only the high-level actor goes into the collector. The low-level controller
 # belongs to the environment. Low-level inference is deterministic and has
@@ -125,40 +233,10 @@ critic = TensorDictModule(
     in_keys=["observation"],
     out_keys=["state_value"],
 )
-loss = ClipPPOLoss(actor, critic, normalize_advantage=True, entropy_coeff=0.01)
-loss.set_keys(action=training_env.action_key)
-loss.make_value_estimator(ValueEstimators.GAE, gamma=0.99, lmbda=0.95)
-optimizer = torch.optim.Adam(loss.parameters(), lr=3e-4)
-collector = Collector(
-    training_env,
-    actor,
-    frames_per_batch=128,
-    total_frames=256 if fast else 2560,
-)
-history = []
 low_level_weights = [p.detach().clone() for p in low_level_policy.parameters()]
-try:
-    for batch in collector:
-        with torch.no_grad():
-            loss.value_estimator(
-                batch,
-                params=loss.critic_network_params,
-                target_params=loss.target_critic_network_params,
-            )
-        for _ in range(4):
-            losses = loss(batch.reshape(-1))
-            objective = (
-                losses["loss_objective"]
-                + losses["loss_critic"]
-                + losses["loss_entropy"]
-            )
-            optimizer.zero_grad()
-            objective.backward()
-            optimizer.step()
-        history.append(batch["next", "reward"].mean().item())
-        collector.update_policy_weights_()
-finally:
-    collector.shutdown()
+history = train_ppo(
+    training_env, actor, critic, frames=2000 if fast else 20_000, gamma=0.99
+)
 
 for before, after in zip(low_level_weights, low_level_policy.parameters()):
     torch.testing.assert_close(before, after)
@@ -254,7 +332,10 @@ for before, after in zip(low_level_weights, low_level_policy.parameters()):
 # Conclusion
 # -----------
 #
-# LowLevelController adapts policy interfaces and isolates per-instance state.
+# A command-target primer and a reward transform turn an ordinary environment
+# into a training ground for the low-level policy, trained with the same
+# collector and loss used for the high-level one. LowLevelController then adapts
+# the trained policy's interface and isolates per-instance state.
 # ClosedLoopMultiAction supplies fresh feedback at each physical step, stops
 # finished environments, and reduces rewards. Existing collectors and losses
 # then train the high-level policy without a second execution framework.
