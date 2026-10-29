@@ -54,7 +54,7 @@ class MujocoPlaygroundAgentSpec:
     """Observation/action slice definition for one agent in a cooperative task.
 
     Args:
-        name (str): group key used in output TensorDicts (e.g. ``"agent_0"``).
+        name (str): unique agent identifier (e.g. ``"agent_0"``).
         action_indices (list of int): indices into the global action vector that
             this agent controls. Must be non-overlapping across all agents and
             together must cover ``range(env.action_size)``.
@@ -63,11 +63,23 @@ class MujocoPlaygroundAgentSpec:
             observation vector. For dict-obs environments, a ``dict`` mapping
             each observation key to a list of ints selecting from that key's
             sub-vector.
+        group (str, optional): top-level key under which this agent appears in
+            output TensorDicts. Agents sharing a ``group`` are stacked along a
+            new ``dim=-2`` of the observation, action and reward, so a group of
+            ``n`` agents has tensors of shape ``[*batch, n, ...]`` and batch
+            size ``[*batch, n]``. Members of a group must have the same
+            observation and action sizes. Defaults to ``name`` (the agent is
+            its own one-agent group, with ``n=1``).
     """
 
     name: str
     action_indices: list[int]
     observation_indices: list[int] | dict[str, list[int]]
+    group: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.group is None:
+            object.__setattr__(self, "group", self.name)
 
 
 @dataclass(frozen=True)
@@ -77,6 +89,12 @@ class MujocoPlaygroundAgentMapping:
     Defines how to split a single-agent MuJoCo Playground environment into a
     cooperative multi-agent task by partitioning the observation and action
     vectors among named agents.
+
+    Agents are organised in groups (see :attr:`MujocoPlaygroundAgentSpec.group`).
+    Every group, including one-agent groups, is exposed as a top-level key
+    whose tensors have shape ``[*batch, n_agents_in_group, ...]`` and whose
+    TensorDict has batch size ``[*batch, n_agents_in_group]``, matching the
+    layout of other torchrl MARL wrappers.
 
     Args:
         agents (list of MujocoPlaygroundAgentSpec): one entry per agent,
@@ -127,6 +145,17 @@ class MujocoPlaygroundAgentMapping:
         ...     ],
         ...     homogenization_mode="none",
         ... )
+        >>> # Stack two agents in one group: observations are [*batch, 2, obs]
+        >>> grouped = MujocoPlaygroundAgentMapping(
+        ...     agents=[
+        ...         MujocoPlaygroundAgentSpec(
+        ...             "a0", [0, 1, 2], [0, 1, 2, 3], group="team"
+        ...         ),
+        ...         MujocoPlaygroundAgentSpec(
+        ...             "a1", [3, 4, 5], [4, 5, 6, 7], group="team"
+        ...         ),
+        ...     ],
+        ... )
     """
 
     agents: list[MujocoPlaygroundAgentSpec] = field(default_factory=list)
@@ -146,11 +175,18 @@ def _validate_agent_mapping(
         observation_size (int or dict): flat obs size or dict obs size map.
 
     Raises:
-        ValueError: if action_indices overlap, are out of range, do not cover
-            ``range(action_size)``, or if observation_indices are invalid.
+        ValueError: if agent names are not unique, action_indices overlap, are
+            out of range, do not cover ``range(action_size)``, if
+            observation_indices are invalid, or if members of a group have
+            different observation or action sizes.
     """
     if not mapping.agents:
         raise ValueError("MujocoPlaygroundAgentMapping.agents must not be empty.")
+
+    names = [a.name for a in mapping.agents]
+    if len(set(names)) != len(names):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(f"Agent names must be unique. Duplicates: {dupes}.")
 
     # Validate action indices
     seen: set[int] = set()
@@ -215,6 +251,29 @@ def _validate_agent_mapping(
                         f"Agent '{agent.name}' has observation index {idx} "
                         f"out of range [0, {observation_size})."
                     )
+
+    # Members of a group are stacked along a new dim, so they need equal shapes.
+    # "max" and "concat" homogenize sizes by construction; only "none" can differ.
+    if mapping.homogenization_mode == "none":
+        sizes: dict[str, tuple[int, int]] = {}
+        for agent in mapping.agents:
+            obs_idx = agent.observation_indices
+            obs_len = (
+                sum(len(v) for v in obs_idx.values())
+                if isinstance(obs_idx, dict)
+                else len(obs_idx)
+            )
+            size = (obs_len, len(agent.action_indices))
+            first = sizes.setdefault(agent.group, size)
+            if size != first:
+                members = [a.name for a in mapping.agents if a.group == agent.group]
+                raise ValueError(
+                    f"Members {members} of group '{agent.group}' must have the "
+                    "same observation and action sizes to be stacked, but "
+                    f"agent '{agent.name}' has (obs, action) sizes {size} "
+                    f"while the group has {first}. Use "
+                    "homogenization_mode='max' to group heterogeneous agents."
+                )
 
 
 # Predefined multi-agent partitionings for common MuJoCo locomotion tasks.
@@ -410,6 +469,14 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
             instance or a string key into :data:`KNOWN_MARL_MAPPINGS`.
             Known string values: ``"ant_4x2"``, ``"halfcheetah_6x1"``,
             ``"hopper_3x1"``, ``"humanoid_9|8"``, ``"walker2d_2x3"``.
+            Agents are organised in groups
+            (:attr:`MujocoPlaygroundAgentSpec.group`, defaulting to the agent's
+            own name). Each group is a top-level key of the observation, action
+            and reward whose tensors have shape ``[*batch, n_agents_in_group, ...]``
+            and whose TensorDict has batch size ``[*batch, n_agents_in_group]``;
+            a one-agent group has ``n=1``. Agents sharing a group are stacked
+            along ``dim=-2`` and must have the same observation and action sizes.
+            The (shared) reward is repeated for every agent of every group.
             Defaults to ``None`` (single-agent mode).
 
     Keyword Args:
@@ -691,33 +758,48 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
             for a in agents
         ]
 
-        # Build per-agent specs
+        # Group agents: group name -> indices of member agents (mapping order),
+        # and per-agent (group, position-in-group) for action routing.
+        groups: dict[str, list[int]] = {}
+        for i, agent in enumerate(agents):
+            groups.setdefault(agent.group, []).append(i)
+        self._marl_groups = groups
+        self._marl_agent_pos = [None] * n_agents
+        for group, members in groups.items():
+            for j, i in enumerate(members):
+                self._marl_agent_pos[i] = (group, j)
+
+        # Build per-group specs, shaped [*batch, n, ...]. Members of a group
+        # share dims (checked in `_validate_agent_mapping`).
         action_spec_dict = {}
         obs_spec_dict = {}
         reward_spec_dict = {}
-        for i, agent in enumerate(agents):
-            action_spec_dict[agent.name] = Composite(
+        for group, members in groups.items():
+            n = len(members)
+            group_shape = (*self.batch_size, n)
+            i = members[0]
+            action_spec_dict[group] = Composite(
                 action=Bounded(
                     low=-1,
                     high=1,
-                    shape=(*self.batch_size, action_dims[i]),
+                    shape=(*group_shape, action_dims[i]),
                     device=self.device,
                 ),
-                shape=self.batch_size,
+                shape=group_shape,
             )
-            obs_spec_dict[agent.name] = Composite(
+            obs_spec_dict[group] = Composite(
                 observation=Unbounded(
-                    shape=(*self.batch_size, obs_dims[i]),
+                    shape=(*group_shape, obs_dims[i]),
                     device=self.device,
                 ),
-                shape=self.batch_size,
+                shape=group_shape,
             )
-            reward_spec_dict[agent.name] = Composite(
+            reward_spec_dict[group] = Composite(
                 reward=Unbounded(
-                    shape=(*self.batch_size, 1),
+                    shape=(*group_shape, 1),
                     device=self.device,
                 ),
-                shape=self.batch_size,
+                shape=group_shape,
             )
 
         self.action_spec = Composite(
@@ -771,8 +853,9 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
             state: raw JAX env state with ``.obs`` attribute.
 
         Returns:
-            dict mapping each agent name to a :class:`~tensordict.TensorDict`
-            with an ``"observation"`` key whose shape matches the agent's spec.
+            dict mapping each group name to a :class:`~tensordict.TensorDict`
+            of batch size ``[*batch, n]`` with an ``"observation"`` key of
+            shape ``[*batch, n, obs]``, where ``n`` is the group size.
         """
         mapping = self._agent_mapping
         agents = mapping.agents
@@ -788,7 +871,7 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
         else:
             obs_raw = _ndarray_to_tensor(state.obs).to(self.device)
 
-        result = {}
+        agent_obs = []
         for i, agent in enumerate(agents):
             if obs_is_dict:
                 # Concatenate selected indices from each obs key
@@ -819,9 +902,14 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
                     else:  # concat: scatter raw at the agent's own obs indices
                         obs_tensor[..., self._marl_obs_index[i]] = raw
 
-            result[agent.name] = TensorDict(
-                {"observation": obs_tensor},
-                batch_size=self.batch_size,
+            agent_obs.append(obs_tensor)
+
+        # Stack the members of each group along a new dim=-2.
+        result = {}
+        for group, members in self._marl_groups.items():
+            result[group] = TensorDict(
+                {"observation": torch.stack([agent_obs[i] for i in members], dim=-2)},
+                batch_size=(*self.batch_size, len(members)),
                 device=self.device,
             )
         return result
@@ -831,7 +919,9 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
 
         Args:
             tensordict (TensorDictBase): input TensorDict containing per-agent
-                action tensors at ``(agent_name, "action")``.
+                action tensors at ``(group, "action")`` of shape
+                ``[*batch, n, action_dim]``; member ``j`` of a group reads
+                slice ``[..., j, :]``.
 
         Returns:
             :class:`torch.Tensor` of shape ``(*batch_size, action_size)``
@@ -845,8 +935,9 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
             dtype=torch.float32,
             device=self.device,
         )
-        for i, agent in enumerate(mapping.agents):
-            a = tensordict.get((agent.name, "action"))
+        for i in range(self._marl_n_agents):
+            group, j = self._marl_agent_pos[i]
+            a = tensordict.get((group, "action"))[..., j, :]
             idx = self._marl_action_index[i]
             if mode == "none":
                 global_action[..., idx] = a
@@ -930,8 +1021,12 @@ class MujocoPlaygroundWrapper(_EnvWrapper):
 
         if self._agent_mapping is not None:
             agent_tds = self._split_obs_for_agents(next_state)
-            for agent in self._agent_mapping.agents:
-                agent_tds[agent.name].set("reward", reward.clone())
+            for group_td in agent_tds.values():
+                n = group_td.batch_size[-1]
+                group_td.set(
+                    "reward",
+                    reward.unsqueeze(-2).expand(*self.batch_size, n, 1).clone(),
+                )
             source = {
                 **agent_tds,
                 "done": done,
@@ -974,6 +1069,14 @@ class MujocoPlaygroundEnv(MujocoPlaygroundWrapper, metaclass=_MujocoPlaygroundMe
             instance or a string key into :data:`KNOWN_MARL_MAPPINGS`.
             Known string values: ``"ant_4x2"``, ``"halfcheetah_6x1"``,
             ``"hopper_3x1"``, ``"humanoid_9|8"``, ``"walker2d_2x3"``.
+            Agents are organised in groups
+            (:attr:`MujocoPlaygroundAgentSpec.group`, defaulting to the agent's
+            own name). Each group is a top-level key of the observation, action
+            and reward whose tensors have shape ``[*batch, n_agents_in_group, ...]``
+            and whose TensorDict has batch size ``[*batch, n_agents_in_group]``;
+            a one-agent group has ``n=1``. Agents sharing a group are stacked
+            along ``dim=-2`` and must have the same observation and action sizes.
+            The (shared) reward is repeated for every agent of every group.
             The mapping and the environment name are validated against each other
             at construction time. Defaults to ``None`` (single-agent mode).
 

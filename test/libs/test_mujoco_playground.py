@@ -587,6 +587,154 @@ class TestMujocoPlaygroundMultiAgent:
         )
         env.close()
 
+    @staticmethod
+    def _grouped_mapping(marl_env_sizes, mode="max", group="team"):
+        obs_size = marl_env_sizes["observation_size"]
+        act_size = marl_env_sizes["action_size"]
+        half_act, half_obs = act_size // 2, obs_size // 2
+        return MujocoPlaygroundAgentMapping(
+            agents=[
+                MujocoPlaygroundAgentSpec(
+                    name="a0",
+                    action_indices=list(range(half_act)),
+                    observation_indices=list(range(half_obs)),
+                    group=group,
+                ),
+                MujocoPlaygroundAgentSpec(
+                    name="a1",
+                    action_indices=list(range(half_act, act_size)),
+                    observation_indices=list(range(half_obs, obs_size)),
+                    group=group,
+                ),
+            ],
+            homogenization_mode=mode,
+        )
+
+    @pytest.mark.parametrize("batch_size", [(), (3,)])
+    def test_grouped_two_agents_shape(self, device, marl_env_sizes, batch_size):
+        mapping = self._grouped_mapping(marl_env_sizes)
+        env = self._make_env(device, marl_env_sizes, mapping, batch_size)
+        env.set_seed(0)
+        td = env.reset()
+        assert set(td.keys()) == {"team", "done", "terminated"}
+        obs_dim = env.observation_spec["team", "observation"].shape[-1]
+        assert td["team", "observation"].shape == torch.Size((*batch_size, 2, obs_dim))
+        assert td["team"].batch_size == torch.Size((*batch_size, 2))
+        act_dim = env.action_spec["team", "action"].shape[-1]
+        assert env.action_spec["team", "action"].shape == torch.Size(
+            (*batch_size, 2, act_dim)
+        )
+        assert env.reward_spec["team", "reward"].shape == torch.Size(
+            (*batch_size, 2, 1)
+        )
+        td = env.rollout(2)
+        assert td["next", "team", "reward"].shape == torch.Size((*batch_size, 2, 2, 1))
+        check_env_specs(env)
+        env.close()
+
+    @pytest.mark.parametrize("batch_size", [(), (3,)])
+    def test_single_agent_groups_have_agent_dim(
+        self, device, marl_env_sizes, batch_size
+    ):
+        env = self._make_env(device, marl_env_sizes, batch_size=batch_size)
+        env.set_seed(0)
+        td = env.reset()
+        obs_size = marl_env_sizes["observation_size"]
+        sizes = {"agent_0": obs_size // 2, "agent_1": obs_size - obs_size // 2}
+        for name, size in sizes.items():
+            assert td[name, "observation"].shape == torch.Size((*batch_size, 1, size))
+            assert td[name].batch_size == torch.Size((*batch_size, 1))
+        td = env.rollout(2)
+        assert td["next", "agent_0", "reward"].shape == torch.Size(
+            (*batch_size, 2, 1, 1)
+        )
+        check_env_specs(env)
+        env.close()
+
+    def test_group_action_routing(self, device, marl_env_sizes):
+        act_size = marl_env_sizes["action_size"]
+        half = act_size // 2
+        mapping = self._grouped_mapping(marl_env_sizes)
+        env = self._make_env(device, marl_env_sizes, mapping)
+        # max mode: per-member action dim is the max size; member 0 -> 1s, member 1 -> 2s
+        act_dim = env.action_spec["team", "action"].shape[-1]
+        action = torch.stack(
+            [torch.full((act_dim,), 1.0), torch.full((act_dim,), 2.0)]
+        ).to(device)
+        td = TensorDict(
+            {"team": TensorDict({"action": action}, batch_size=[2])}, batch_size=[]
+        ).to(device)
+        glob = env._reconstruct_global_action(td)
+        for agent, value in zip(mapping.agents, (1.0, 2.0)):
+            assert (glob[..., agent.action_indices] == value).all()
+        assert glob.shape[-1] == act_size
+        assert half > 0
+        env.close()
+
+    def test_group_action_routing_single_agent_groups(self, device, marl_env_sizes):
+        act_size = marl_env_sizes["action_size"]
+        half = act_size // 2
+        env = self._make_env(device, marl_env_sizes)
+        td = TensorDict(
+            {
+                "agent_0": TensorDict(
+                    {"action": torch.full((1, half), 1.0)}, batch_size=[1]
+                ),
+                "agent_1": TensorDict(
+                    {"action": torch.full((1, act_size - half), 2.0)}, batch_size=[1]
+                ),
+            },
+            batch_size=[],
+        ).to(device)
+        glob = env._reconstruct_global_action(td)
+        assert (glob[..., :half] == 1.0).all()
+        assert (glob[..., half:] == 2.0).all()
+        env.close()
+
+    def test_group_shape_mismatch_raises(self, device, marl_env_sizes):
+        obs_size = marl_env_sizes["observation_size"]
+        # Same action size but different obs sizes
+        mapping = MujocoPlaygroundAgentMapping(
+            agents=[
+                MujocoPlaygroundAgentSpec(
+                    "a0", [0, 1, 2], list(range(4)), group="team"
+                ),
+                MujocoPlaygroundAgentSpec(
+                    "a1", [3, 4, 5], list(range(4, 4 + 6)), group="team"
+                ),
+            ],
+        )
+        with pytest.raises(ValueError, match="group 'team'"):
+            self._make_env(device, marl_env_sizes, mapping)
+        # Same obs size but different action sizes
+        mapping = MujocoPlaygroundAgentMapping(
+            agents=[
+                MujocoPlaygroundAgentSpec("a0", [0, 1], list(range(4)), group="team"),
+                MujocoPlaygroundAgentSpec(
+                    "a1", [2, 3, 4, 5], list(range(4, 8)), group="team"
+                ),
+            ],
+        )
+        assert obs_size >= 8
+        with pytest.raises(ValueError, match="group 'team'"):
+            self._make_env(device, marl_env_sizes, mapping)
+        # "max" homogenization makes the same heterogeneous group valid
+        mapping = MujocoPlaygroundAgentMapping(
+            agents=mapping.agents, homogenization_mode="max"
+        )
+        env = self._make_env(device, marl_env_sizes, mapping)
+        env.close()
+
+    def test_duplicate_agent_names_raise(self, device, marl_env_sizes):
+        mapping = MujocoPlaygroundAgentMapping(
+            agents=[
+                MujocoPlaygroundAgentSpec("a", [0, 1, 2], [0, 1], group="g0"),
+                MujocoPlaygroundAgentSpec("a", [3, 4, 5], [2, 3], group="g1"),
+            ],
+        )
+        with pytest.raises(ValueError, match="unique"):
+            self._make_env(device, marl_env_sizes, mapping)
+
     def test_no_mapping_regression(self, device, marl_env_sizes):
         """Without `agent_mapping`, the env exposes the single-agent layout
         (flat ``observation``), and with the same env+seed the multi-agent
@@ -642,6 +790,7 @@ class TestKnownMarlMappings:
                 assert isinstance(agent, MujocoPlaygroundAgentSpec), name
                 assert len(agent.action_indices) > 0, name
                 assert len(agent.observation_indices) > 0, name
+                assert agent.group == agent.name, name
 
     def test_string_mapping_resolves(self):
         # CheetahRun has action_size=6 — matches halfcheetah_6x1
